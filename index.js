@@ -4,9 +4,11 @@ const axios = require('axios');
 const WebSocket = require('ws');
 const colors = require('colors');
 const readline = require('readline');
+const cluster = require('cluster');
+const numCPUs = require('os').cpus().length;
 
 class Layernet {
-    constructor() {
+    constructor(accountIndex, queryId, userData) {
         this.dataFilePath = path.join(__dirname, 'data.txt');
         this.baseURL = 'https://tongame-service-roy7ocqnoq-ew.a.run.app';
         this.ws = null;
@@ -15,52 +17,23 @@ class Layernet {
         this.claimingCoin = false;
         this.startingGame = false;
         this.gameCount = 1;
-        this.maxGames = 5; // Maximum number of games
+        this.maxGames = 50000; // Maximum number of games
+        this.accountIndex = accountIndex;
+        this.queryId = queryId;
+        this.userData = userData;
     }
 
     log(msg) {
-        console.log(`[*] ${msg}`);
+        console.log(`Akun-${this.accountIndex}: ${msg}`);
     }
 
-    async getQueryIdAndUserData() {
-        try {
-            const data = fs.readFileSync(this.dataFilePath, 'utf8')
-                .replace(/\r/g, '')
-                .split('\n')
-                .filter(Boolean);
-
-            if (data.length === 0) {
-                throw new Error('data.txt is empty or not found.');
-            }
-
-            const queryIdLine = data[0];
-            const queryParams = new URLSearchParams(queryIdLine);
-            const userDataString = queryParams.get('user');
-
-            if (!userDataString) {
-                throw new Error('User data not found in query_id.');
-            }
-
-            const userData = JSON.parse(decodeURIComponent(userDataString));
-
-            if (!userData.id) {
-                throw new Error('Invalid user data: id is missing.');
-            }
-
-            return { queryId: queryIdLine, userData };
-        } catch (error) {
-            console.error('Error reading query_id and user data:', error);
-            throw error;
-        }
-    }
-
-    async getAccessToken(queryId, userData) {
+    async getAccessToken() {
         const url = `${this.baseURL}/api/user/login`;
         const payload = {
-            telegramId: userData.id,
-            firstName: userData.first_name,
-            lastName: userData.last_name,
-            languageCode: userData.language_code,
+            telegramId: this.userData.id,
+            firstName: this.userData.first_name,
+            lastName: this.userData.last_name,
+            languageCode: this.userData.language_code,
             isVip: false
         };
 
@@ -69,10 +42,10 @@ class Layernet {
                 headers: {
                     'Accept': 'application/json, text/plain, */*',
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${queryId}`,
+                    'Authorization': `Bearer ${this.queryId}`,
                     'Origin': 'https://netcoin.layernet.ai',
                     'Referer': 'https://netcoin.layernet.ai/',
-                    'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+                    'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, seperti Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
                 }
             });
 
@@ -97,7 +70,6 @@ class Layernet {
         this.ws = new WebSocket(wsURL, { headers });
 
         this.ws.on('open', () => {
-            this.log('Successfully logged in!');
             this.sendAuthMessage(accessToken);
         });
 
@@ -106,7 +78,8 @@ class Layernet {
         });
 
         this.ws.on('close', () => {
-            this.log('Disconnected from server!');
+            this.log(`Disconnected from server!`);
+            this.resetGame();
         });
 
         this.ws.on('error', (error) => {
@@ -134,15 +107,14 @@ class Layernet {
                 if (parsedMessage[0] === "exception") {
                     const { message } = parsedMessage[1];
                     if (message === "Game not started" && this.isRound2Active) {
-                        this.log('Game not started message received. Stopping Round 2.');
-                        this.isRound2Active = false; 
-                        this.sendHomeDataRequest(); 
-                        return; 
+                        this.isRound2Active = false;
+                        this.sendHomeDataRequest();
+                        return;
                     }
                 }
                 this.processGameData(parsedMessage);
             } catch (error) {
-                this.log(`Failed to parse message as JSON: ${error.message}`);
+                console.log(`Failed to parse message as JSON: ${error.message}`);
             }
         }
     }
@@ -152,37 +124,34 @@ class Layernet {
         if (userRank && claimCountdown) {
             const { role, profitPerHour } = userRank;
             const { minutes, seconds } = claimCountdown;
-            this.log(`Role: ${role}, ProfitPerHour: ${profitPerHour}, Balance: ${gold}, DOGS: ${dogs}`);
             const totalMinutesRemaining = minutes + (seconds / 60);
-            this.log(`Time remaining to claim: ${minutes} minutes ${seconds} seconds`);
             if (!this.gameStarted && !this.claimingCoin && totalMinutesRemaining < 10) {
                 this.claimCoin();
             }
             if (!this.startingGame) {
                 setTimeout(() => this.startGame(), 3000);
             }
+
+            this.log(`Restarting game (${this.gameCount}/${this.maxGames}) | Role: ${role} | Balance: ${gold} | DOGS: ${dogs}`);
         }
     }
-    
+
     async claimCoin() {
         if (this.claimingCoin) {
-            this.log('Coin is already being claimed.');
-            return; 
+            return;
         }
         this.claimingCoin = true;
-        this.log('Claiming coin...');
         const withdrawClaimMessage = JSON.stringify(['withdrawClaim']);
         this.ws.send(`42${withdrawClaimMessage}`);
         setTimeout(() => {
-            this.claimingCoin = false; 
-            this.sendHomeDataRequest(); 
-        }, 2000); 
+            this.claimingCoin = false;
+            this.sendHomeDataRequest();
+        }, 2000);
     }
 
     async startGame() {
-        if (this.startingGame) return; 
+        if (this.startingGame) return;
         this.startingGame = true;
-        this.log(`Starting game, do not close the tool until completion!`);
         const startGameMessage = JSON.stringify(["startGame"]);
         this.ws.send(`422${startGameMessage}`);
 
@@ -203,19 +172,18 @@ class Layernet {
             } else {
                 clearInterval(interval);
                 if (roundNumber === 1) {
-                    this.log('Completed round 1, starting Round 2.');
                     this.playRound2(2);
                 }
             }
         }, 10000 / 60);
     }
-    
+
     async playRound2(roundNumber) {
         let bodem = 63;
         let messageCount = 0;
         const interval = setInterval(() => {
             if (messageCount < 100) {
-                if (this.isRound2Active) { 
+                if (this.isRound2Active) {
                     const inGameMessage = JSON.stringify(["inGame", { round: roundNumber, time: Date.now(), gameover: false }]);
                     this.ws.send(`42${bodem}${inGameMessage}`);
                     messageCount++;
@@ -224,16 +192,13 @@ class Layernet {
             } else {
                 clearInterval(interval);
                 if (this.isRound2Active) {
-                    this.log('Round 2 completed!');
                     this.sendHomeDataRequest();
-                    this.isRound2Active = false; 
+                    this.isRound2Active = false;
                     this.startingGame = false;
                     this.gameCount++;
                     if (this.gameCount < this.maxGames) {
-                        this.log(`Restarting game (${this.gameCount}/${this.maxGames})`);
-                        setTimeout(() => this.startGame(), 1000); 
+                        setTimeout(() => this.startGame(), 1000);
                     } else {
-                        this.log('All game rounds completed!');
                         this.ws.close();
                     }
                 }
@@ -250,59 +215,65 @@ class Layernet {
         console.log('');
     }
 
-    async main() {
-        while (true) {
-            try {
-                const data = fs.readFileSync(this.dataFilePath, 'utf8')
-                    .replace(/\r/g, '')
-                    .split('\n')
-                    .filter(Boolean);
-    
-                if (data.length === 0) {
-                    throw new Error('data.txt is empty or not found.');
-                }
-    
-                for (let index = 0; index < data.length; index++) {
-                    const queryIdLine = data[index];
-                    const queryParams = new URLSearchParams(queryIdLine);
-                    const userDataString = queryParams.get('user');
-                    
-                    if (!userDataString) {
-                        console.log(`Account ${index + 1}/${data.length}: User data not found.`);
-                        continue;
-                    }
-    
-                    const userData = JSON.parse(decodeURIComponent(userDataString));
-    
-                    if (!userData.id) {
-                        console.log(`Account ${index + 1}/${data.length}: Invalid user ID.`);
-                        continue;
-                    }
-    
-                    console.log(`========== Account ${index + 1}/${data.length} | ${userData.first_name} ==========`);
+    async resetGame() {
+        this.gameStarted = false;
+        this.isRound2Active = false;
+        this.claimingCoin = false;
+        this.startingGame = false;
+        this.gameCount = 1;
+        await this.waitWithCountdown(3);
+        await this.start();
+    }
 
-                    const layernet = new Layernet();
-                    const accessToken = await layernet.getAccessToken(queryIdLine, userData);
-                    await layernet.connectWebSocket(accessToken);
-    
-                    await new Promise(resolve => layernet.ws.on('close', resolve));
-                    await this.waitWithCountdown(3);
-                }
-
-                await this.waitWithCountdown(30);
-    
-            } catch (error) {
-                console.error('Error during processing:', error);
-            }
-        }
-    }    
+    async start() {
+        const accessToken = await this.getAccessToken();
+        await this.connectWebSocket(accessToken);
+        await new Promise(resolve => this.ws.on('close', resolve));
+    }
 }
 
 if (require.main === module) {
-    const layernet = new Layernet();
-    layernet.main().catch(err => {
-        console.error(err);
-        process.exit(1);
-    });
-}
+    if (cluster.isMaster) {
+        try {
+            const data = fs.readFileSync(path.join(__dirname, 'data.txt'), 'utf8')
+                .replace(/\r/g, '')
+                .split('\n')
+                .filter(Boolean);
 
+            if (data.length === 0) {
+                throw new Error('data.txt is empty or not found.');
+            }
+
+            for (let index = 0; index < data.length; index++) {
+                const queryIdLine = data[index];
+                const queryParams = new URLSearchParams(queryIdLine);
+                const userDataString = queryParams.get('user');
+
+                if (!userDataString) {
+                    console.log(`Account ${index + 1}/${data.length}: User data not found.`);
+                    continue;
+                }
+
+                const userData = JSON.parse(decodeURIComponent(userDataString));
+
+                if (!userData.id) {
+                    console.log(`Account ${index + 1}/${data.length}: Invalid user ID.`);
+                    continue;
+                }
+
+                cluster.fork({ ACCOUNT_INDEX: index + 1, QUERY_ID: queryIdLine, USER_DATA: JSON.stringify(userData) });
+            }
+        } catch (error) {
+            console.error('Error during processing:', error);
+        }
+    } else {
+        const accountIndex = process.env.ACCOUNT_INDEX;
+        const queryId = process.env.QUERY_ID;
+        const userData = JSON.parse(process.env.USER_DATA);
+        const layernet = new Layernet(accountIndex, queryId, userData);
+        layernet.start().catch(err => {
+            console.error(err);
+            process.exit(1);
+        });
+    }
+}
